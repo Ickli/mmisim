@@ -1,0 +1,2 @@
+Software for basic simulation of logical/digital circuits.
+Written in C for fun and portability, uses custom data structures only internally.
