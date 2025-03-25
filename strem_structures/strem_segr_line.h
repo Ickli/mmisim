@@ -1,7 +1,6 @@
 #ifndef STREM_SEGR_LINE_H_
 #define STREM_SEGR_LINE_H_
 #include <stdbool.h>
-#include <stddef.h>
 
 struct StremSegrLine_FreeNode {
 	struct StremSegrLine_FreeNode* next;

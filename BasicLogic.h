@@ -26,6 +26,15 @@ typedef struct {
 
 typedef struct {
     char in1;
+    char in2;
+    char in3;
+    char out;
+    char outn;
+    int n;
+} TriGateState;
+
+typedef struct {
+    char in1;
     char out;
     char outn;
 } UniGateState;
@@ -39,6 +48,7 @@ unsigned Scheme_MakeEdge(void* scheme, int firstNodeId, int secondNodeId, int fi
 void Scheme_EndScheming(void* scheme);
 
 void Scheme_traverse(void* scheme);
+void Scheme_TraverseNew(void* scheme_erased);
 void Scheme_PrintCycles(void* scheme);
 
 // Some parameters in loadInfo, that aren't 0, will be used to init gate.
@@ -47,6 +57,9 @@ LogicGate* GateAnd_New(const LogicGate* loadInfo);
 LogicGate* GateOr_New(const LogicGate* loadInfo);
 LogicGate* GateNot_New(const LogicGate* loadInfo);
 LogicGate* GateNor_New(const LogicGate* loadInfo);
+LogicGate* GateNand_New(const LogicGate* loadInfo);
+LogicGate* GateNand3_New(const LogicGate* loadInfo);
+LogicGate* GateXor_New(const LogicGate* loadInfo);
 
 LogicGate* Gates_Allocate();
 
