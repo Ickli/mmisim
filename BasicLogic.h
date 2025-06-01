@@ -1,6 +1,8 @@
 #ifndef MMISIM_BASIC_LOGIC_H_
 #define MMISIM_BASIC_LOGIC_H_
 
+extern unsigned long TraverseLimit;
+
 typedef void(*LogicGateTick)(void* state);
 
 typedef enum {

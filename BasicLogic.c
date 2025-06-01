@@ -6,12 +6,15 @@
 #include <strem_structures/strem_ht.h>
 #include <strem_structures/strem_queue.h>
 #include <BasicLogic.h>
+
 #define GATES_MAX_COUNT 256
 #define SCHEMES_MAX_COUNT 8
 #define SCHEME_NODE_CAP 4
 #define SCHEME_EDGE_CAP 16
 #define EDGE_CAP 2
 #define CYCLE_MAX_TRAVERSION 8
+
+/* extern */ unsigned long TraverseLimit = 1024;
 
 static void GateAnd_Tick(void* state);
 static void GateOr_Tick(void* state);
@@ -22,10 +25,7 @@ static bool Scheme_CmpUnsigned(void const*, void const*);
 
 static LogicGate Gates[GATES_MAX_COUNT];
 static size_t Gates_Count = 0;
-// static size_t FreeGateIds[GATES_MAX_COUNT];
-// static size_t FreeGateIds_Count = 0;
 
-// static void Gates_Deallocate(const LogicGate* gate) { }
 LogicGate* Gates_Allocate() {
     return &Gates[Gates_Count++];
 }
@@ -222,10 +222,6 @@ typedef struct {
     StremVector /* StremVector<unsigned> */ cycles;
     StremVector /* char */ cyclesCheck;
     StremQueue /* LogicScheme_Node* */ nodesQueued;
-    // stack, unused currently
-    StremVector /* unsigned */ cyclesBeingProcessed;
-    // stack, unused currently
-    StremVector /* unsigned */ edgesToTraverse;
     StremVector /* char */ dependentOutputs;
     StremHashTable /* unsigned, StremVector<unsigned> */ cyclesPerNode;
 } LogicScheme;
@@ -248,8 +244,6 @@ void* Scheme_New() {
     s->edges = StremVector_construct(sizeof(LogicScheme_Edge), SCHEME_EDGE_CAP);
     s->cycles = StremVector_construct(sizeof(StremVector), SCHEME_EDGE_CAP);
     s->cyclesCheck = StremVector_construct(sizeof(char), SCHEME_EDGE_CAP);
-    s->cyclesBeingProcessed = StremVector_construct(sizeof(unsigned), SCHEME_EDGE_CAP);
-    s->edgesToTraverse = StremVector_construct(sizeof(unsigned), SCHEME_EDGE_CAP);
     s->dependentOutputs = StremVector_construct(sizeof(char), SCHEME_EDGE_CAP);
     s->nodesQueued = StremQueue_construct(sizeof(LogicScheme_Node*), SCHEME_EDGE_CAP);
     s->cyclesPerNode = StremHashTable_construct(
@@ -297,46 +291,30 @@ unsigned Scheme_MakeEdge(void* scheme_erased, int firstNodeId, int secondNodeId,
     return edgeId;
 }
 
-// TODO: update, and fix nested vectors
 void Scheme_Free(void* scheme_erased) {
     LogicScheme* s = (LogicScheme*)scheme_erased;
+
+    const size_t nodeCount = s->nodes.size;
+
     StremVector_free(&s->nodes);
     StremVector_free(&s->edges);
+
+    for(int i = 0; i < s->cycles.size; ++i) {
+        StremVector_free(&StremVectorAt(s->cycles, StremVector, i));
+    }
+
     StremVector_free(&s->cycles);
     StremVector_free(&s->cyclesCheck);
-    StremVector_free(&s->cyclesBeingProcessed);
-    StremVector_free(&s->edgesToTraverse);
     StremVector_free(&s->dependentOutputs);
     StremQueue_free(&s->nodesQueued);
+
+    for(unsigned nodeInd = 0; nodeInd < nodeCount; ++nodeInd) {
+        StremVector* /* unsigned */ cycles 
+            = StremHashTable_at(&s->cyclesPerNode, &nodeInd);
+        if(cycles != NULL) { StremVector_free(cycles); }
+    }
+
     StremHashTable_free(&s->cyclesPerNode);
-}
-
-static unsigned SchemeNode_AreEncycledTogether(LogicScheme* s, unsigned fNodeId, unsigned sNodeId) {
-    const StremVector* /* unsigned */ fCycles = StremHashTable_at(&s->cyclesPerNode, &fNodeId);
-    if(fCycles == NULL) {
-        return false;
-    }
-
-    const StremVector* /* unsigned */ sCycles = StremHashTable_at(&s->cyclesPerNode, &sNodeId);
-    if(sCycles == NULL) {
-        return false;
-    }
-
-    memset(s->cyclesCheck.content, 0, s->cyclesCheck.size*s->cyclesCheck.elem_size);
-    for(unsigned i = 0; i < fCycles->size; ++i) {
-        StremVectorAt(s->cyclesCheck, char, StremVectorAt(*fCycles, unsigned, i)) = 1;
-    }
-
-    unsigned cycleNum = 0;
-    for(unsigned i = 0; i < sCycles->size; ++i) {
-        const unsigned cycleId = StremVectorAt(*sCycles, unsigned, i);
-        if(StremVectorAt(s->cyclesCheck, char, cycleId) != 0) {
-            cycleNum = cycleId + 1;
-            break;
-        }
-    }
-
-    return cycleNum;
 }
 
 static void SchemeNode_Tick(LogicScheme* s, LogicScheme_Node* n) {
@@ -350,16 +328,6 @@ static void SchemeNode_Tick(LogicScheme* s, LogicScheme_Node* n) {
         outEdge->isResolved = 1;
         *outEdge->toNodeInPin = *outEdge->fromNodeOutPin;
     }
-}
-
-static size_t Scheme_HashEdgePath(const LogicScheme* sc, const StremVector* /* unsigned */  edgePath) {
-    size_t hash = (size_t)-1;
-    for(unsigned i = 0; i < edgePath->size; ++i) {
-        const LogicScheme_Edge* edge = &StremVectorAt(sc->edges, LogicScheme_Edge, i);
-        const unsigned fromNode = edge->fromNodeId;
-        hash = (hash << 1) ^ fromNode;
-    }
-    return hash;
 }
 
 static StremVector Scheme_FromLinkedEdgesToVector(
@@ -388,6 +356,17 @@ static StremVector Scheme_FromLinkedEdgesToVector(
     return edgePath;
 }
 
+static size_t Scheme_HashEdgePath(const LogicScheme* sc, const StremVector* /* unsigned */  edgePath) {
+    size_t hash = (size_t)-1;
+    for(unsigned i = 0; i < edgePath->size; ++i) {
+        const LogicScheme_Edge* edge = &StremVectorAt(sc->edges, LogicScheme_Edge, i);
+        const unsigned fromNode = edge->fromNodeId;
+        hash = (hash << 1) ^ fromNode;
+    }
+    return hash;
+}
+
+
 static bool Scheme_IsCyclePresent(
     const LogicScheme* s, 
     const StremVector* /* unsigned */ edgePath,
@@ -415,7 +394,7 @@ static void Scheme_AddCycleIfNotExists(LogicScheme* s, StremVector* cycleHashes,
     const unsigned startInd = curEdgeInd;
     StremVector edgePath = Scheme_FromLinkedEdgesToVector(s, linkedEdges, curEdgeInd, firstCycledNum);
     // printf("AddCycle: firstCycledNum = %u\n", firstCycledNum);
-    Scheme_PrintCycle_(s, &edgePath);
+    // Scheme_PrintCycle_(s, &edgePath);
     
     size_t hash = 0;
     
@@ -574,235 +553,7 @@ static bool Scheme_CmpUnsigned(void const* fptr, void const* sptr) {
 }
 
 /******************* NEW LOGIC *********************/
-static void Scheme_TraverseInputs(LogicScheme* s, unsigned nodeId);
-static void Scheme_RememberDependentOutputs(LogicScheme* s, unsigned cycleId);
 
-static void Scheme_AddUnmetCyclesToSubstack(LogicScheme* s, size_t subStart, unsigned nodeId) {
-    const StremVector* /* unsigned */ cycles = StremHashTable_at(&s->cyclesPerNode, &nodeId);
-    for(unsigned i = 0; i < cycles->size; ++i) {
-        bool cycleFound = false;
-        const unsigned cycleId = StremVectorAt(*cycles, unsigned, i);
-        for(unsigned j = subStart; j < s->cyclesBeingProcessed.size; ++j) {
-            if(cycleId == StremVectorAt(s->cyclesBeingProcessed, unsigned, j)) {
-                cycleFound = true;
-                break;
-            }
-        }
-
-        if(!cycleFound) {
-            StremVector_push(&s->cyclesBeingProcessed, &cycleId, 1);
-            Scheme_RememberDependentOutputs(s, cycleId);
-        }
-    }
-}
-
-static unsigned Scheme_GetDependentNode(const LogicScheme* s, unsigned cycleId) {
-    const StremVector* edgePath = &StremVectorAt(s->cycles, StremVector, cycleId);
-    const LogicScheme_Edge* edge = &StremVectorAt(s->edges, LogicScheme_Edge, StremVectorAt(*edgePath, unsigned, edgePath->size - 1));
-    return edge->fromNodeId;
-}
-
-static void Scheme_RememberDependentOutputs(LogicScheme* s, unsigned cycleId) {
-    const LogicScheme_Node* node = &StremVectorAt(s->nodes, LogicScheme_Node, Scheme_GetDependentNode(s, cycleId));
-
-    for(unsigned i = 0; i < node->outEdgeIndices.size; ++i) {
-        const unsigned edgeInd = StremVectorAt(node->outEdgeIndices, unsigned, i);
-        const LogicScheme_Edge* outEdge = &StremVectorAt(s->edges, LogicScheme_Edge, edgeInd);
-        StremVector_push(&s->dependentOutputs, outEdge->toNodeInPin, 1);
-    }
-}
-
-static void Scheme_TickDependentOutputs_(LogicScheme* s, size_t cycleSubstackStart) {
-    for(unsigned cycleIdInd = cycleSubstackStart; cycleIdInd < s->cyclesBeingProcessed.size; ++cycleIdInd) {
-        const unsigned cycleId = StremVectorAt(s->cyclesBeingProcessed, unsigned, cycleIdInd);
-        // const StremVector* cycle = &StremVectorAt(s->cycles, StremVector, cycleId);
-
-        LogicScheme_Node* depNode = &StremVectorAt(s->nodes, LogicScheme_Node, Scheme_GetDependentNode(s, cycleId));
-        SchemeNode_Tick(s, depNode);
-    }
-}
-
-static void Scheme_TickDependentOutputs(LogicScheme* s, size_t cycleSubstackStart) {
-    for(unsigned cycleIdInd = cycleSubstackStart; cycleIdInd < s->cyclesBeingProcessed.size; ++cycleIdInd) {
-        const unsigned cycleId = StremVectorAt(s->cyclesBeingProcessed, unsigned, cycleIdInd);
-        const StremVector* cycle = &StremVectorAt(s->cycles, StremVector, cycleId);
-
-        // Traversing whole cycle and not solely dependent nodes, because in-mid node may need
-        // to propagate new out value to the dep.node, but has already ticked in cycle traversion.
-        //
-        // traverse from end to start of a stack -> traverse from start to end of a cycle,
-        // because cycle is reversed in the stack.
-        // traverse toNode and not fromNode, so the last traversed node will be dependent 
-        // node of the cycle.
-        for(int edgeIdInd = cycle->size - 1; edgeIdInd >= 0; --edgeIdInd) {
-            const unsigned edgeId = StremVectorAt(*cycle, unsigned, edgeIdInd);
-            LogicScheme_Edge* edge = &StremVectorAt(s->edges, LogicScheme_Edge, edgeId);
-
-            LogicScheme_Node* toNode = &StremVectorAt(s->nodes, LogicScheme_Node, edge->toNodeId);
-            SchemeNode_Tick(s, toNode);
-        } 
-    }
-}
-
-static void Scheme_RefreshDependentOutputs(LogicScheme* s, size_t cycleSubstackStart, size_t outSubstackStart) {
-    size_t curOutPos = outSubstackStart;
-
-    for(unsigned cycleIdInd = cycleSubstackStart; cycleIdInd < s->cyclesBeingProcessed.size; ++cycleIdInd) {
-        const unsigned cycleId = StremVectorAt(s->cyclesBeingProcessed, unsigned, cycleIdInd);
-        // const StremVector* cycle = &StremVectorAt(s->cycles, StremVector, cycleId);
-
-        LogicScheme_Node* depNode = &StremVectorAt(s->nodes, LogicScheme_Node, Scheme_GetDependentNode(s, cycleId));
-
-        for(unsigned i = 0; i < depNode->outEdgeIndices.size; ++i) {
-            const unsigned edgeInd = StremVectorAt(depNode->outEdgeIndices, unsigned, i);
-            const LogicScheme_Edge* outEdge = &StremVectorAt(s->edges, LogicScheme_Edge, edgeInd);
-
-            StremVectorAt(s->dependentOutputs, char, curOutPos) = *outEdge->toNodeInPin;
-
-            curOutPos++;
-        }
-    }
-}
-
-// returns true if outputs have not changed.
-// otherwise, returns false and sets firstUnmatchedDepNode
-static bool Scheme_CmpDependentOutputs(LogicScheme* s, size_t cycleSubstackStart, size_t outSubstackStart, LogicScheme_Node** firstUnmatchedDepNode) {
-    size_t curOutPos = outSubstackStart;
-
-    for(unsigned cycleIdInd = cycleSubstackStart; cycleIdInd < s->cyclesBeingProcessed.size; ++cycleIdInd) {
-        const unsigned cycleId = StremVectorAt(s->cyclesBeingProcessed, unsigned, cycleIdInd);
-        // const StremVector* cycle = &StremVectorAt(s->cycles, StremVector, cycleId);
-
-        LogicScheme_Node* depNode = &StremVectorAt(s->nodes, LogicScheme_Node, Scheme_GetDependentNode(s, cycleId));
-
-        for(unsigned i = 0; i < depNode->outEdgeIndices.size; ++i) {
-            const unsigned edgeInd = StremVectorAt(depNode->outEdgeIndices, unsigned, i);
-            const LogicScheme_Edge* outEdge = &StremVectorAt(s->edges, LogicScheme_Edge, edgeInd);
-
-            if(StremVectorAt(s->dependentOutputs, char, curOutPos) != *outEdge->toNodeInPin) {
-                // printf("Output has changed for node %u of cycle %u\n", outEdge->fromNodeId, cycleId);
-                *firstUnmatchedDepNode = depNode;
-                return false;
-            }
-
-            curOutPos++;
-        }
-    }
-
-    return true;
-}
-
-static size_t StartSubstack(StremVector* stack) {
-    return stack->size;
-}
-
-static void EndSubstack(StremVector* stack, size_t substackStart) {
-#ifdef DEBUG
-    if(substackStart > stack->size) {
-        printf("ERROR: EndSubstack: substackStart (%lu) > stack size (%lu)\n", substackStart, stack->size);
-        exit(1);
-    }
-#endif
-    stack->size = substackStart;
-}
-
-static bool Scheme_IsCycleBeingProcessed(const LogicScheme* s, size_t batchStart, unsigned cycleId) {
-    for(size_t i = batchStart; i < s->cyclesBeingProcessed.size; ++i) {
-        if(StremVectorAt(s->cyclesBeingProcessed, unsigned, i) == cycleId) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void Scheme_TraverseCycledNew(LogicScheme* s, unsigned nodeId) {
-    Scheme_TraverseInputs(s, nodeId);
-
-    // i don't like the idea of allocating smth per call, so use slices
-    size_t edgeStackStart = StartSubstack(&s->edgesToTraverse);
-    size_t cycleStackStart = StartSubstack(&s->cyclesBeingProcessed);
-    size_t depOutputsStart = StartSubstack(&s->dependentOutputs);
-
-    int traverse = 0;
-    LogicScheme_Node* curnode = &StremVectorAt(s->nodes, LogicScheme_Node, nodeId);
-    Scheme_TraverseInputs(s, nodeId);
-    SchemeNode_Tick(s, curnode);
-    curnode->hasTicked = traverse + 1;
-    Scheme_AddUnmetCyclesToSubstack(s, cycleStackStart, nodeId);
-
-    for(traverse = 0; traverse < CYCLE_MAX_TRAVERSION; ++traverse) {
-        StremVector_push(&s->edgesToTraverse, curnode->outEdgeIndices.content, curnode->outEdgeIndices.size);
-
-        while(s->edgesToTraverse.size != edgeStackStart) {
-            const unsigned edgeInd = StremVectorPopBack(s->edgesToTraverse, unsigned);
-            const LogicScheme_Edge* edge = &StremVectorAt(s->edges, LogicScheme_Edge, edgeInd);
-
-            curnode = &StremVectorAt(s->nodes, LogicScheme_Node, edge->toNodeId);
-
-            if(!SchemeNode_AreEncycledTogether(s, edge->fromNodeId, edge->toNodeId)) {
-                continue;
-            }
-
-            // if traversed on this iteration, skip
-            if(curnode->hasTicked == traverse + 1) {
-                continue;
-            }
-
-            Scheme_TraverseInputs(s, edge->toNodeId);
-            SchemeNode_Tick(s, curnode);
-            curnode->hasTicked = traverse + 1;
-
-            if(traverse == 0) {
-                Scheme_AddUnmetCyclesToSubstack(s, cycleStackStart, edge->toNodeId);
-            }
-            StremVector_push(&s->edgesToTraverse, curnode->outEdgeIndices.content, curnode->outEdgeIndices.size);
-        }
-
-        // Ticks whole cycles
-        Scheme_TickDependentOutputs(s, cycleStackStart);
-        if(Scheme_CmpDependentOutputs(s, cycleStackStart, depOutputsStart, &curnode)) {
-            break;
-        }
-
-        // TODO: try to not refresh those outputs which are assured to be equal by CmpDependentOutputs
-        Scheme_RefreshDependentOutputs(s, cycleStackStart, depOutputsStart);
-    }
-
-    if(traverse == CYCLE_MAX_TRAVERSION) {
-        printf("WARNING: Scheme_TraverseCyclesNew: max traversion count exceeded\n");
-    }
-
-    EndSubstack(&s->edgesToTraverse, edgeStackStart);
-    EndSubstack(&s->cyclesBeingProcessed, cycleStackStart);
-    EndSubstack(&s->dependentOutputs, depOutputsStart);
-}
-
-static void Scheme_TraverseInputs(LogicScheme* s, unsigned nodeId) {
-    LogicScheme_Node* n = &StremVectorAt(s->nodes, LogicScheme_Node, nodeId);
-
-    if(n->hasTicked) {
-        return;
-    }
-
-    for(unsigned edgeIdInd = 0; edgeIdInd < n->inEdgeIndices.size; ++edgeIdInd) {
-        unsigned edgeId = StremVectorAt(n->inEdgeIndices, unsigned, edgeIdInd);
-        LogicScheme_Edge* edge = &StremVectorAt(s->edges, LogicScheme_Edge, edgeId);
-        // printf("??? %p\n", edge->fromNodeOutPin);
-
-        LogicScheme_Node* fromNode = &StremVectorAt(s->nodes, LogicScheme_Node, edge->fromNodeId);
-        if(fromNode->hasTicked) {
-            continue;
-        }
-
-        bool isFromCycled = (StremHashTable_at(&s->cyclesPerNode, &edge->fromNodeId) != NULL);
-        if(!isFromCycled) {
-            Scheme_TraverseInputs(s, edge->fromNodeId);
-            SchemeNode_Tick(s, fromNode);
-        } else if(!SchemeNode_AreEncycledTogether(s, nodeId, edge->fromNodeId)) {
-            Scheme_TraverseCycledNew(s, edge->fromNodeId);
-        }
-    }
-}
 
 static void Scheme_EnqueChildren(LogicScheme* s, const LogicScheme_Node* n, bool outputsHaveChanged) {
     for(unsigned edgeIdInd = 0; edgeIdInd < n->outEdgeIndices.size; ++edgeIdInd) {
@@ -856,12 +607,21 @@ void Scheme_TraverseNew(void* scheme_erased) {
         SchemeNode_Tick(s, node);
         Scheme_EnqueChildren(s, node, true);
 
-        while(StremQueueSize(s->nodesQueued) != 0) {
+        unsigned long limitCounter = 0;
+
+        while(limitCounter < TraverseLimit && StremQueueSize(s->nodesQueued) != 0) {
             node = StremQueueDeque(s->nodesQueued, LogicScheme_Node*);
 
             SchemeNode_RememberOutputs(s, node);
             SchemeNode_Tick(s, node);
             Scheme_EnqueChildren(s, node, SchemeNode_HaveOutputsChanged(s, node));
+            limitCounter++;
+        }
+
+        if(limitCounter == TraverseLimit) {
+            // TODO: implement step-by-step
+            fprintf(stderr, "Exceeded traverse limit, try execute step-by-step\n");
+            abort();
         }
     }
 }
