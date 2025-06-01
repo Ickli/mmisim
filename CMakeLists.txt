@@ -10,6 +10,7 @@ set(SOURCE_FILES
     Utils.c
     strem_structures/strem_vector.c
     strem_structures/strem_ht.c
+    strem_structures/strem_queue.c
 )
 set(INCLUDE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/strem_structures/"

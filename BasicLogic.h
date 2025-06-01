@@ -47,7 +47,6 @@ unsigned Scheme_MakeNode(void* scheme, LogicGate* gate);
 unsigned Scheme_MakeEdge(void* scheme, int firstNodeId, int secondNodeId, int firstPinOut, int secondPinIn);
 void Scheme_EndScheming(void* scheme);
 
-void Scheme_traverse(void* scheme);
 void Scheme_TraverseNew(void* scheme_erased);
 void Scheme_PrintCycles(void* scheme);
 

@@ -1,2 +1,4 @@
 Software for basic simulation of logical/digital circuits.
 Written in C for fun and portability, uses custom data structures only internally.
+
+TODO: add per-gate step to support jk flip-flops and so on.
